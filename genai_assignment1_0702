@@ -1,0 +1,116 @@
+# Import Libraries and Set Paths
+
+%pip install transformers torch PyMuPDF scikit-learn
+
+import fitz  # PyMuPDF
+import os
+import numpy as np
+import pandas as pd
+from transformers import pipeline
+from sklearn.decomposition import PCA
+import torch
+import ast
+
+# Path to PDF file in Unity Catalog Volume
+pdf_path = "/Volumes/srgenai/default/mygenaivolume/sample_task.pdf"  
+
+
+# Paths to save embeddings
+embedding_paths = {
+    8: "/dbfs/tmp/embeddings_8d.csv",
+    16: "/dbfs/tmp/embeddings_16d.csv",
+    32: "/dbfs/tmp/embeddings_32d.csv"
+}
+
+#Extract Unique Words from PDF
+def extract_words_from_pdf(path):
+    doc = fitz.open(path)
+    words = []
+    for page in doc:
+        text = page.get_text()
+        words.extend(text.split())
+    doc.close()
+    # Remove punctuation and lowercase
+    return list(set([w.strip('.,;:!?()[]{}').lower() for w in words if w.strip()]))
+
+words = extract_words_from_pdf(pdf_path)
+print(f"Extracted {len(words)} unique words.")
+
+#Load BERT Model for Embedding using BERT feature-extraction pipeline
+
+embedder = pipeline("feature-extraction", model="bert-base-uncased", tokenizer="bert-base-uncased")
+
+#Generate and Save Embeddings (8D, 16D, 32D)
+# Function to get [CLS] token embedding (768D) for a single word
+def get_bert_embedding(word):
+    with torch.no_grad():
+        outputs = embedder(word)
+        return np.array(outputs[0][0])  # CLS token
+
+# Generate 768D embeddings
+word_embeddings = {}
+for word in words:
+    try:
+        word_embeddings[word] = get_bert_embedding(word)
+    except Exception as e:
+        print(f"Error embedding '{word}': {e}")
+
+print(f"Embedded {len(word_embeddings)} words.")
+
+# COMMAND ----------
+
+# Generate and save reduced embeddings
+for dim in [8, 16, 32]:
+    words_list = list(word_embeddings.keys())
+    full_matrix = np.array([word_embeddings[w] for w in words_list])
+    
+    pca = PCA(n_components=dim)
+    reduced = pca.fit_transform(full_matrix)
+
+    df = pd.DataFrame({
+        "word": words_list,
+        "embedding": reduced.tolist()
+    })
+    df.to_csv(embedding_paths[dim], index=False)
+    print(f"Saved {dim}D embeddings to {embedding_paths[dim]}")
+
+#Search or Add New Word
+Load existing embeddings from file
+def load_embeddings(dim):
+    path = embedding_paths[dim]
+    if os.path.exists(path):
+        return pd.read_csv(path, converters={"embedding": ast.literal_eval})
+    else:
+        return pd.DataFrame(columns=["word", "embedding"])
+
+# Save updated DataFrame
+def save_embeddings(df, dim):
+    df.to_csv(embedding_paths[dim], index=False)
+
+# Search or add word
+def get_or_add_word_embedding(word):
+    word = word.strip().lower()
+    found = True
+    result = {}
+
+    try:
+        full_embedding = get_bert_embedding(word)
+    except:
+        return False, {}
+
+    for dim in [8, 16, 32]:
+        df = load_embeddings(dim)
+        match = df[df["word"] == word]
+
+        if not match.empty:
+            result[dim] = match.iloc[0]["embedding"]
+        else:
+            found = False
+            pca = PCA(n_components=dim)
+            reduced = pca.fit_transform([full_embedding])[0].tolist()
+            df = pd.concat([df, pd.DataFrame([{"word": word, "embedding": reduced}])])
+            save_embeddings(df, dim)
+            result[dim] = reduced
+
+    return found, result
+
