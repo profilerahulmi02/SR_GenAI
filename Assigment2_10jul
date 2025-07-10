@@ -40,10 +40,19 @@ print(generated_text)
 
 #part-4 Image generation
 
-generator = pipeline("image-generation")
+from diffusers import DiffusionPipeline
+import torch
 
-prompt = "Once upon a time in a distant galaxy"
+# Load model from Hugging Face
+pipe = DiffusionPipeline.from_pretrained("aiyouthalliance/Free-Image-Generation-CC0")
 
-generated_text = generator(prompt)
+# Move to GPU if available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+pipe = pipe.to(device)
 
-print(generated_text)
+# Generate image
+prompt = "Astronaut in a jungle, cold color palette, muted colors, detailed, 8k"
+image = pipe(prompt).images[0]
+
+# Save the generated image
+image.save("astronaut_jungle.png")
