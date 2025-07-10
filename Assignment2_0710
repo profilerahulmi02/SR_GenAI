@@ -1,0 +1,56 @@
+#part-1 : enhanced prompt text 
+
+from transformers import pipeline
+
+def pl1_prompt_enhancer(prompt: str) -> str:
+    generator = pipeline("text-generation", model="gpt2")
+    result = generator(prompt, max_length=100, do_sample=True, temperature=0.8)
+    return result[0]['generated_text']
+
+#part-2 key-phrases extract
+
+from transformers import pipeline
+
+def pl2_keyphrase_extractor(text: str) -> list:
+    summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+    summary = summarizer(text, max_length=60, min_length=20, do_sample=False)[0]['summary_text']
+    return [phrase.strip() for phrase in summary.split(",") if phrase]
+
+# part-3 write poem
+def pl3_rewriter(keyphrases: list) -> str:
+    prompt = "Write a short poem using the following keyphrases:\n"
+    prompt += ", ".join(keyphrases) + "\nPoem:\n"
+    generator = pipeline("text-generation", model="gpt2")
+    result = generator(prompt, max_length=80, do_sample=True, temperature=0.7)
+    return result[0]['generated_text']
+
+#part-4 : image generation
+from diffusers import StableDiffusionPipeline
+import torch
+
+def pl4_image_generator(prompt: str):
+    model_id = "runwayml/stable-diffusion-v1-5"
+    pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
+    pipe = pipe.to("cuda" if torch.cuda.is_available() else "cpu")
+    image = pipe(prompt).images[0]
+    image.save("generated_image.png")
+    return "Image saved as 'generated_image.png'"
+
+#Pipeline rum - main
+
+def run_pipeline(user_prompt: str):
+    print(">> PL1: Enhancing Prompt")
+    enhanced_text = pl1_prompt_enhancer(user_prompt)
+    print(enhanced_text)
+
+    print("\n>> PL2: Extracting Keyphrases")
+    keyphrases = pl2_keyphrase_extractor(enhanced_text)
+    print(keyphrases)
+
+    print("\n>> PL3: Generating New Poem")
+    new_poem = pl3_rewriter(keyphrases)
+    print(new_poem)
+
+    print("\n>> PL4: Generating Image from Poem")
+    image_status = pl4_image_generator(new_poem)
+    print(image_status)
