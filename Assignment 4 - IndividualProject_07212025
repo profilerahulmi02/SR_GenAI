@@ -1,0 +1,130 @@
+#Your task is to build a simple RAG pipeline in databricks notebook that can dynamically switch between semantic retrieval and function calling—based entirely on what kind of prompt the user provides.
+#There will be three PDF files in dbfs filestore from which you’d like to ask questions about. Extract raw text from each PDF and chunk it into smaller passages of around 300–500 characters. Store these chunks in a Hive Metastore-backed table named as rag_rahul_chunks using Spark. Next, generate vector embeddings for each chunk using OpenAI’s text-embedding-ada-002 model, and store them either in the Hive table named as rag_rahul_embeddings. This gives you a searchable document index backed by Hive.
+#Now it’s time to build your retrieval logic—but instead of using standard Python functions, you’ll build it using LangChain Runnables. You’re expected to define a runnable that takes an input question, embeds it, compares it with your stored vectors, and returns the top matching documents. 
+#Use proper code API and import packages and organize your Runnables properly , structure them or chain them together. This part will likely include combining components like embedding models, retrievers, and prompt templates into a runnable pipeline.
+#Here’s the twist: your system must be able to recognize if the user is asking a search question or a math question. If the user types a prompt like “What shrimps eat?” then your RAG pipeline should run as usual. But if the user types “What is 234 + 91?”, you should skip retrieval and instead call a custom Python function called addition(a, b) that returns the sum. 
+#You’ll use a simple prompt classification step to make this decision—either using keyword rules or a lightweight GPT-4 prompt that returns a task type. Code generation using GPT-4 can help you build this logic if you’re unsure how to write clean and testable decision code.
+#By the end of the project, you’ll have to built a hybrid LLM pipeline that can switch between knowledge-grounded generation and direct computation, powered by LangChain and deployed entirely in Databricks. You’ll use  LangChain code, GPT-4 to help generate or correct logic, and the Hive Metastore to manage your vectorized knowledge base. The outcome is a flexible, AI-assisted system that demonstrates not just retrieval, but smart reasoning about when retrieval is appropriate.
+
+%pip install PyPDF2 -U langchain-community
+from pyspark.sql import SparkSession
+from PyPDF2 import PdfReader
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("SimpleRAG").getOrCreate()
+#create chunks for 3 pdf document
+def extract_and_chunk_pdf(file_path, chunk_size=400):
+    reader = PdfReader(file_path)
+    text = " ".join(page.extract_text() or "" for page in reader.pages)
+    return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+
+pdf_paths = [
+    "/Workspace/Users/dbuser7@meteoros.ai/Mantis_shrimp_facts.pdf",
+    "/Workspace/Users/dbuser7@meteoros.ai/Mantis_shrimp_facts2.pdf",
+    "/Workspace/Users/dbuser7@meteoros.ai/Mantis_shrimp_facts3.pdf"
+]
+
+chunks = []
+for path in pdf_paths:
+    chunks.extend(extract_and_chunk_pdf(path))
+
+chunk_df = spark.createDataFrame([(i, chunk) for i, chunk in enumerate(chunks)], ["id", "chunk"])
+chunk_df.write.mode("overwrite").saveAsTable("rag_chunks_db7")
+
+#create embeddings for pdf documents and save in table
+from openai import AzureOpenAI
+
+client = AzureOpenAI(
+    api_key="Test" #"9qwAgDEDJJPsCidbF5tV6UJoK3y33t5jqpt64N1SGOjrXtByiVSJJQQJ99BGAC4f1cMXJ3w3AAABACOGIox2",
+    azure_endpoint="https://kiran255666.openai.azure.com/",
+    api_version="2024-12-01-preview"
+)
+
+def get_embedding(text):
+    return client.embeddings.create(
+        model="text-embedding-ada-002",
+        input=text
+    ).data[0].embedding
+
+import pandas as pd
+
+pdf = chunk_df.toPandas()
+pdf["embedding"] = pdf["chunk"].apply(get_embedding)
+
+embed_df = spark.createDataFrame(pdf)
+embed_df.write.mode("overwrite").saveAsTable("rag_embeddings_db7")
+
+from pyspark.sql.functions import col, lit, udf
+from pyspark.sql.types import DoubleType
+import numpy as np
+
+# Define cosine similarity
+def cosine_similarity(a, b):
+    a, b = np.array(a), np.array(b)
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+# Register as UDF
+cosine_udf = udf(cosine_similarity, DoubleType())
+
+def get_top_k_chunks(query, k=3):
+    query_embedding = get_embedding(query)  # list
+    df = spark.sql("SELECT * FROM simple_rag_embeddings_dbuser2")
+    
+    # Create a new column by applying the cosine similarity UDF
+    df = df.withColumn("score", cosine_udf(col("embedding"), lit(query_embedding)))
+    
+    # Get top K scored chunks
+    top_chunks = df.orderBy(col("score").desc()).limit(k).toPandas()
+    return [row["chunk"] for _, row in top_chunks.iterrows()]
+
+import re
+
+def addition(a, b):
+    return a + b
+
+def parse_numbers(prompt):
+    nums = list(map(int, re.findall(r'\d+', prompt)))
+    return nums if len(nums) >= 2 else [0, 0]
+
+def classify_prompt(prompt):
+    classification_prompt = f"""Classify this prompt as either 'math' or 'search'.
+
+Prompt: "{prompt}"
+Answer:"""
+    result = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": classification_prompt}]
+    )
+    return result.choices[0].message.content.strip().lower()
+
+from langchain_core.runnables import RunnableLambda
+from langchain.prompts import PromptTemplate
+
+template = PromptTemplate.from_template("""
+Use the following context to answer the question:
+
+{context}
+
+Question: {question}
+""")
+
+def run_pipeline(prompt):
+    task = classify_prompt(prompt)
+    
+    if "math" in task:
+        a, b = parse_numbers(prompt)
+        return f"Answer: {addition(a, b)}"
+    
+    else:
+        top_chunks = get_top_k_chunks(prompt)
+        context = "\n\n".join(top_chunks)
+        final_prompt = template.format(context=context, question=prompt)
+        
+        answer = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": final_prompt}]
+        )
+        return answer.choices[0].message.content
+print(run_pipeline("What is 30 + 543?"))
+print(run_pipeline("What shrimps eat"))
+print(run_pipeline("What is 101 + 29?"))
